@@ -6,6 +6,14 @@ import azure.functions as func
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 
+def check_api_key(req: func.HttpRequest) -> bool:
+    expected_key = os.environ.get("API_KEY")
+    provided_key = req.headers.get("X-API-Key")
+
+    if not expected_key or not provided_key:
+        return False
+
+    return provided_key == expected_key
 
 @app.route(route="hello")
 def hello(req: func.HttpRequest) -> func.HttpResponse:
@@ -70,6 +78,13 @@ def db_test(req: func.HttpRequest) -> func.HttpResponse:
 def get_sets(req: func.HttpRequest) -> func.HttpResponse:
     logging.info("GET /api/sets")
 
+    if not check_api_key(req):
+        return func.HttpResponse(
+            json.dumps({"error": "Unauthorized"}),
+            status_code=401,
+            mimetype="application/json"
+        )
+
     try:
         conn = pyodbc.connect(os.environ["SQL_CONNECTION_STRING"])
         cursor = conn.cursor()
@@ -129,6 +144,13 @@ def get_sets(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="sets/{set_id}", methods=["GET"])
 def get_set(req: func.HttpRequest) -> func.HttpResponse:
     logging.info("GET /api/sets/{set_id}")
+
+    if not check_api_key(req):
+        return func.HttpResponse(
+            json.dumps({"error": "Unauthorized"}),
+            status_code=401,
+            mimetype="application/json"
+        )
 
     set_id = req.route_params.get("set_id")
 
@@ -217,6 +239,14 @@ def get_set(req: func.HttpRequest) -> func.HttpResponse:
 def get_set_items(req: func.HttpRequest) -> func.HttpResponse:
     logging.info("GET /api/sets/{set_id}/items")
 
+    if not check_api_key(req):
+        return func.HttpResponse(
+            json.dumps({"error": "Unauthorized"}),
+            status_code=401,
+            mimetype="application/json"
+        )
+
+
     set_id = req.route_params.get("set_id")
 
     if not set_id:
@@ -290,6 +320,13 @@ def get_set_items(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="sets", methods=["POST"])
 def save_set(req: func.HttpRequest) -> func.HttpResponse:
     logging.info("POST /api/sets")
+
+    if not check_api_key(req):
+        return func.HttpResponse(
+            json.dumps({"error": "Unauthorized"}),
+            status_code=401,
+            mimetype="application/json"
+        )
 
     # =========================================================
     # PARAMETERS
