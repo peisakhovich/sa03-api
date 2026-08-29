@@ -333,21 +333,11 @@ def save_set(req: func.HttpRequest) -> func.HttpResponse:
     # =========================================================
 
     user_id = req.params.get("user_id")
-    language_level_id = req.params.get("language_level_id")
-
+    
     if not user_id:
         return func.HttpResponse(
             json.dumps({
                 "error": "Missing user_id"
-            }, ensure_ascii=False),
-            status_code=400,
-            mimetype="application/json"
-        )
-
-    if not language_level_id:
-        return func.HttpResponse(
-            json.dumps({
-                "error": "Missing language_level_id"
             }, ensure_ascii=False),
             status_code=400,
             mimetype="application/json"
@@ -364,16 +354,6 @@ def save_set(req: func.HttpRequest) -> func.HttpResponse:
             mimetype="application/json"
         )
 
-    try:
-        language_level_id = int(language_level_id)
-    except ValueError:
-        return func.HttpResponse(
-            json.dumps({
-                "error": "Invalid language_level_id"
-            }, ensure_ascii=False),
-            status_code=400,
-            mimetype="application/json"
-        )
 
     # =========================================================
     # JSON BODY
@@ -419,11 +399,9 @@ def save_set(req: func.HttpRequest) -> func.HttpResponse:
                 """
                 EXEC dbo.sp_save_set_json
                     @user_id = ?,
-                    @language_level_id = ?,
                     @json = ?
                 """,
                 user_id,
-                language_level_id,
                 json_text
             )
 
@@ -471,7 +449,7 @@ def save_set(req: func.HttpRequest) -> func.HttpResponse:
             return func.HttpResponse(
                 json.dumps({
                     "error": "Language level not found",
-                    "language_level_id": language_level_id
+                    "language_level": body.get("language_level")
                 }, ensure_ascii=False),
                 status_code=404,
                 mimetype="application/json"
