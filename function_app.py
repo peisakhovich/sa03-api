@@ -3,6 +3,8 @@ import json
 import logging
 import pyodbc
 import azure.functions as func
+from password import hash_password
+from password import verify_password
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 
@@ -14,6 +16,404 @@ def check_api_key(req: func.HttpRequest) -> bool:
         return False
 
     return provided_key == expected_key
+
+@app.route(route="login", methods=["POST"])
+def login_user(req: func.HttpRequest) -> func.HttpResponse:
+    logging.info("POST /api/login")
+
+    if not check_api_key(req):
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Unauthorized"
+            }),
+            status_code=401,
+            mimetype="application/json"
+        )
+
+    # =========================================================
+    # JSON BODY
+    # =========================================================
+
+    try:
+        body = req.get_json()
+    except ValueError:
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Invalid JSON"
+            }, ensure_ascii=False),
+            status_code=400,
+            mimetype="application/json"
+        )
+
+    if not isinstance(body, dict):
+        return func.HttpResponse(
+            json.dumps({
+                "error": "JSON body must be an object"
+            }, ensure_ascii=False),
+            status_code=400,
+            mimetype="application/json"
+        )
+
+    nickname = body.get("nickname")
+    password = body.get("password")
+
+    if not nickname:
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Missing nickname"
+            }, ensure_ascii=False),
+            status_code=400,
+            mimetype="application/json"
+        )
+
+    if not password:
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Missing password"
+            }, ensure_ascii=False),
+            status_code=400,
+            mimetype="application/json"
+        )
+
+    # =========================================================
+    # DATABASE
+    # =========================================================
+
+    try:
+        connection_string = os.environ["SQL_CONNECTION_STRING"]
+
+        with pyodbc.connect(
+            connection_string,
+            timeout=10
+        ) as conn:
+
+            cursor = conn.cursor()
+
+            cursor.execute(
+                """
+                SELECT
+                    us_id,
+                    us_nicname,
+                    us_first_name,
+                    us_last_name,
+                    us_password_hash,
+                    us_active
+                FROM dbo.users
+                WHERE us_nicname = ?
+                """,
+                nickname
+            )
+
+            row = cursor.fetchone()
+
+            # -------------------------------------------------
+            # Пользователь не найден
+            # -------------------------------------------------
+
+            if row is None:
+                return func.HttpResponse(
+                    json.dumps({
+                        "error": "Invalid credentials"
+                    }, ensure_ascii=False),
+                    status_code=401,
+                    mimetype="application/json"
+                )
+
+            # -------------------------------------------------
+            # Данные пользователя
+            # -------------------------------------------------
+
+            user_id = row[0]
+            user_nickname = row[1]
+            first_name = row[2]
+            last_name = row[3]
+            password_hash = row[4]
+            active = row[5]
+
+            # -------------------------------------------------
+            # Проверка активности
+            # -------------------------------------------------
+
+            if not active:
+                return func.HttpResponse(
+                    json.dumps({
+                        "error": "User account is inactive"
+                    }, ensure_ascii=False),
+                    status_code=403,
+                    mimetype="application/json"
+                )
+
+            # -------------------------------------------------
+            # Проверка пароля
+            # -------------------------------------------------
+
+            if not password_hash:
+                return func.HttpResponse(
+                    json.dumps({
+                        "error": "Invalid credentials"
+                    }, ensure_ascii=False),
+                    status_code=401,
+                    mimetype="application/json"
+                )
+
+            if not verify_password(
+                password,
+                password_hash
+            ):
+                return func.HttpResponse(
+                    json.dumps({
+                        "error": "Invalid credentials"
+                    }, ensure_ascii=False),
+                    status_code=401,
+                    mimetype="application/json"
+                )
+
+            # -------------------------------------------------
+            # Успешный login
+            # -------------------------------------------------
+
+            return func.HttpResponse(
+                json.dumps({
+                    "user_id": user_id,
+                    "nickname": user_nickname,
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "active": active
+                }, ensure_ascii=False),
+                status_code=200,
+                mimetype="application/json"
+            )
+
+    except Exception as e:
+
+        logging.exception(
+            "POST /api/login failed"
+        )
+
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Internal server error",
+                "message": str(e)
+            }, ensure_ascii=False),
+            status_code=500,
+            mimetype="application/json"
+        )
+
+
+@app.route(route="register", methods=["POST"])
+def register_user(req: func.HttpRequest) -> func.HttpResponse:
+    logging.info("POST /api/register")
+
+    # =========================================================
+    # API KEY
+    # =========================================================
+
+    if not check_api_key(req):
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Unauthorized"
+            }, ensure_ascii=False),
+            status_code=401,
+            mimetype="application/json"
+        )
+
+    # =========================================================
+    # JSON BODY
+    # =========================================================
+
+    try:
+        body = req.get_json()
+
+    except ValueError:
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Invalid JSON"
+            }, ensure_ascii=False),
+            status_code=400,
+            mimetype="application/json"
+        )
+
+    if not isinstance(body, dict):
+        return func.HttpResponse(
+            json.dumps({
+                "error": "JSON body must be an object"
+            }, ensure_ascii=False),
+            status_code=400,
+            mimetype="application/json"
+        )
+
+    # =========================================================
+    # PARAMETERS
+    # =========================================================
+
+    nickname = body.get("nickname")
+    password = body.get("password")
+
+    first_name = body.get("first_name")
+    last_name = body.get("last_name")
+
+    if not nickname:
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Missing nickname"
+            }, ensure_ascii=False),
+            status_code=400,
+            mimetype="application/json"
+        )
+
+    if not password:
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Missing password"
+            }, ensure_ascii=False),
+            status_code=400,
+            mimetype="application/json"
+        )
+
+    # =========================================================
+    # PASSWORD HASH
+    # =========================================================
+
+    try:
+        password_hash = hash_password(password)
+
+    except Exception:
+        logging.exception(
+            "Password hashing failed"
+        )
+
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Password hashing failed"
+            }, ensure_ascii=False),
+            status_code=500,
+            mimetype="application/json"
+        )
+
+    # =========================================================
+    # DATABASE
+    # =========================================================
+
+    try:
+        connection_string = os.environ["SQL_CONNECTION_STRING"]
+
+        with pyodbc.connect(
+            connection_string,
+            timeout=10
+        ) as conn:
+
+            cursor = conn.cursor()
+
+            cursor.execute(
+                """
+                EXEC dbo.sp_register_user
+                    @us_nicname = ?,
+                    @us_first_name = ?,
+                    @us_last_name = ?,
+                    @us_password_hash = ?
+                """,
+                nickname,
+                first_name,
+                last_name,
+                password_hash
+            )
+
+            row = cursor.fetchone()
+
+            if row is None:
+                return func.HttpResponse(
+                    json.dumps({
+                        "error": "User was not created"
+                    }, ensure_ascii=False),
+                    status_code=500,
+                    mimetype="application/json"
+                )
+
+            columns = [
+                column[0]
+                for column in cursor.description
+            ]
+
+            user = dict(
+                zip(columns, row)
+            )
+
+            # datetime2 → JSON string
+            if user["us_create_date"] is not None:
+                user["us_create_date"] = (
+                    user["us_create_date"].isoformat()
+                )
+
+            if user["us_update_date"] is not None:
+                user["us_update_date"] = (
+                    user["us_update_date"].isoformat()
+                )
+
+            return func.HttpResponse(
+                json.dumps(
+                    {
+                        "user_id": user["us_id"],
+                        "nickname": user["us_nicname"],
+                        "first_name": user["us_first_name"],
+                        "last_name": user["us_last_name"],
+                        "active": user["us_active"]
+                    },
+                    ensure_ascii=False
+                ),
+                status_code=201,
+                mimetype="application/json"
+            )
+
+    except pyodbc.Error as e:
+
+        logging.exception(
+            "POST /api/register database error"
+        )
+
+        error_message = str(e)
+
+        # -----------------------------------------------------
+        # Nickname already exists
+        # -----------------------------------------------------
+
+        if "(50001)" in error_message:
+
+            return func.HttpResponse(
+                json.dumps({
+                    "error": "Nickname already exists",
+                    "nickname": nickname
+                }, ensure_ascii=False),
+                status_code=409,
+                mimetype="application/json"
+            )
+
+        # -----------------------------------------------------
+        # Unknown database error
+        # -----------------------------------------------------
+
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Database error",
+                "message": error_message
+            }, ensure_ascii=False),
+            status_code=500,
+            mimetype="application/json"
+        )
+
+    except Exception as e:
+
+        logging.exception(
+            "POST /api/register failed"
+        )
+
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Internal server error",
+                "message": str(e)
+            }, ensure_ascii=False),
+            status_code=500,
+            mimetype="application/json"
+        )
 
 @app.route(route="hello")
 def hello(req: func.HttpRequest) -> func.HttpResponse:
@@ -74,7 +474,6 @@ def db_test(req: func.HttpRequest) -> func.HttpResponse:
         )
 
 @app.route(route="sets", methods=["GET"])
-
 def get_sets(req: func.HttpRequest) -> func.HttpResponse:
     logging.info("GET /api/sets")
 
@@ -85,49 +484,84 @@ def get_sets(req: func.HttpRequest) -> func.HttpResponse:
             mimetype="application/json"
         )
 
-    try:
-        conn = pyodbc.connect(os.environ["SQL_CONNECTION_STRING"])
-        cursor = conn.cursor()
+    # =========================================================
+    # PARAMETERS
+    # =========================================================
 
-        cursor.execute("""
-            SELECT
-                set_id,
-                user_id,
-                user_nickname,
-                set_index,
-                set_name,
-                set_description,
-                set_active,
-                set_create_date,
-                set_update_date,
-                items_count
-            FROM vw_sets
-            ORDER BY user_id, set_index
-        """)
+    user_id = req.params.get("user_id")
 
-        columns = [column[0] for column in cursor.description]
-
-        rows = []
-        for row in cursor.fetchall():
-            item = dict(zip(columns, row))
-
-            # datetime2 → строка JSON
-            if item["set_create_date"] is not None:
-                item["set_create_date"] = item["set_create_date"].isoformat()
-
-            if item["set_update_date"] is not None:
-                item["set_update_date"] = item["set_update_date"].isoformat()
-
-            rows.append(item)
-
-        cursor.close()
-        conn.close()
-
+    if not user_id:
         return func.HttpResponse(
-            json.dumps(rows, ensure_ascii=False),
-            status_code=200,
+            json.dumps({
+                "error": "Missing user_id"
+            }, ensure_ascii=False),
+            status_code=400,
             mimetype="application/json"
         )
+
+    try:
+        user_id = int(user_id)
+    except ValueError:
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Invalid user_id"
+            }, ensure_ascii=False),
+            status_code=400,
+            mimetype="application/json"
+        )
+
+    # =========================================================
+    # DATABASE
+    # =========================================================
+
+    try:
+        connection_string = os.environ["SQL_CONNECTION_STRING"]
+
+        with pyodbc.connect(connection_string, timeout=10) as conn:
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                SELECT
+                    set_id,
+                    user_id,
+                    user_nickname,
+                    set_index,
+                    set_name,
+                    set_description,
+                    set_active,
+                    set_create_date,
+                    set_update_date,
+                    items_count
+                FROM vw_sets
+                WHERE user_id = ?
+                ORDER BY set_index
+            """, user_id)
+
+            columns = [column[0] for column in cursor.description]
+
+            rows = []
+
+            for row in cursor.fetchall():
+                item = dict(zip(columns, row))
+
+                # datetime2 → строка JSON
+                if item["set_create_date"] is not None:
+                    item["set_create_date"] = (
+                        item["set_create_date"].isoformat()
+                    )
+
+                if item["set_update_date"] is not None:
+                    item["set_update_date"] = (
+                        item["set_update_date"].isoformat()
+                    )
+
+                rows.append(item)
+
+            return func.HttpResponse(
+                json.dumps(rows, ensure_ascii=False),
+                status_code=200,
+                mimetype="application/json"
+            )
 
     except Exception as e:
         logging.exception("GET /api/sets failed")
@@ -333,7 +767,7 @@ def save_set(req: func.HttpRequest) -> func.HttpResponse:
     # =========================================================
 
     user_id = req.params.get("user_id")
-    
+
     if not user_id:
         return func.HttpResponse(
             json.dumps({
