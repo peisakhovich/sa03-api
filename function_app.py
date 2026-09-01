@@ -958,3 +958,201 @@ def save_set(req: func.HttpRequest) -> func.HttpResponse:
             status_code=500,
             mimetype="application/json"
         )
+
+@app.route(route="sets/{set_id}", methods=["PUT"])
+def update_set(req: func.HttpRequest) -> func.HttpResponse:
+    logging.info("PUT /api/sets/{set_id}")
+
+    # =========================================================
+    # API KEY
+    # =========================================================
+
+    if not check_api_key(req):
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Unauthorized"
+            }, ensure_ascii=False),
+            status_code=401,
+            mimetype="application/json"
+        )
+
+    # =========================================================
+    # SET ID
+    # =========================================================
+
+    set_id = req.route_params.get("set_id")
+
+    if not set_id:
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Missing set_id"
+            }, ensure_ascii=False),
+            status_code=400,
+            mimetype="application/json"
+        )
+
+    try:
+        set_id = int(set_id)
+    except ValueError:
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Invalid set_id"
+            }, ensure_ascii=False),
+            status_code=400,
+            mimetype="application/json"
+        )
+
+    # =========================================================
+    # JSON BODY
+    # =========================================================
+
+    try:
+        body = req.get_json()
+
+    except ValueError:
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Invalid JSON"
+            }, ensure_ascii=False),
+            status_code=400,
+            mimetype="application/json"
+        )
+
+    if not isinstance(body, dict):
+        return func.HttpResponse(
+            json.dumps({
+                "error": "JSON body must be an object"
+            }, ensure_ascii=False),
+            status_code=400,
+            mimetype="application/json"
+        )
+
+    # =========================================================
+    # PARAMETERS
+    # =========================================================
+
+    set_name = body.get("set_name")
+    set_description = body.get("set_description")
+
+    if not set_name:
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Missing set_name"
+            }, ensure_ascii=False),
+            status_code=400,
+            mimetype="application/json"
+        )
+
+    # =========================================================
+    # DATABASE
+    # =========================================================
+
+    try:
+        connection_string = os.environ["SQL_CONNECTION_STRING"]
+
+        with pyodbc.connect(
+            connection_string,
+            timeout=10
+        ) as conn:
+
+            cursor = conn.cursor()
+
+            cursor.execute(
+                """
+                EXEC dbo.sp_update_set
+                    @se_id = ?,
+                    @se_name = ?,
+                    @se_description = ?
+                """,
+                set_id,
+                set_name,
+                set_description
+            )
+
+            row = cursor.fetchone()
+
+            if row is None:
+                return func.HttpResponse(
+                    json.dumps({
+                        "error": "Set was not updated"
+                    }, ensure_ascii=False),
+                    status_code=500,
+                    mimetype="application/json"
+                )
+
+            columns = [
+                column[0]
+                for column in cursor.description
+            ]
+
+            updated_set = dict(
+                zip(columns, row)
+            )
+
+            # datetime2 → JSON string
+
+            if updated_set["se_update_date"] is not None:
+                updated_set["se_update_date"] = (
+                    updated_set["se_update_date"].isoformat()
+                )
+
+            return func.HttpResponse(
+                json.dumps({
+                    "set_id": updated_set["se_id"],
+                    "set_name": updated_set["se_name"],
+                    "set_description": updated_set["se_description"],
+                    "set_update_date": updated_set["se_update_date"]
+                }, ensure_ascii=False),
+                status_code=200,
+                mimetype="application/json"
+            )
+
+    except pyodbc.Error as e:
+
+        logging.exception(
+            "PUT /api/sets/{set_id} database error"
+        )
+
+        error_message = str(e)
+
+        # =====================================================
+        # SET NOT FOUND
+        # =====================================================
+
+        if "(50001)" in error_message:
+            return func.HttpResponse(
+                json.dumps({
+                    "error": "Set not found",
+                    "set_id": set_id
+                }, ensure_ascii=False),
+                status_code=404,
+                mimetype="application/json"
+            )
+
+        # =====================================================
+        # UNKNOWN DATABASE ERROR
+        # =====================================================
+
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Database error",
+                "message": error_message
+            }, ensure_ascii=False),
+            status_code=500,
+            mimetype="application/json"
+        )
+
+    except Exception as e:
+
+        logging.exception(
+            "PUT /api/sets/{set_id} failed"
+        )
+
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Internal server error",
+                "message": str(e)
+            }, ensure_ascii=False),
+            status_code=500,
+            mimetype="application/json"
+        )
