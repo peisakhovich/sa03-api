@@ -415,6 +415,263 @@ def register_user(req: func.HttpRequest) -> func.HttpResponse:
             mimetype="application/json"
         )
 
+@app.route(route="change-password", methods=["POST"])
+def change_password_user(req: func.HttpRequest) -> func.HttpResponse:
+    logging.info("POST /api/change-password")
+
+    # =========================================================
+    # API KEY
+    # =========================================================
+
+    if not check_api_key(req):
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Unauthorized"
+            }, ensure_ascii=False),
+            status_code=401,
+            mimetype="application/json"
+        )
+
+    # =========================================================
+    # JSON BODY
+    # =========================================================
+
+    try:
+        body = req.get_json()
+
+    except ValueError:
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Invalid JSON"
+            }, ensure_ascii=False),
+            status_code=400,
+            mimetype="application/json"
+        )
+
+    if not isinstance(body, dict):
+        return func.HttpResponse(
+            json.dumps({
+                "error": "JSON body must be an object"
+            }, ensure_ascii=False),
+            status_code=400,
+            mimetype="application/json"
+        )
+
+    # =========================================================
+    # PARAMETERS
+    # =========================================================
+
+    user_id = body.get("user_id")
+    current_password = body.get("current_password")
+    new_password = body.get("new_password")
+
+    if not user_id:
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Missing user_id"
+            }, ensure_ascii=False),
+            status_code=400,
+            mimetype="application/json"
+        )
+
+    if not current_password:
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Missing current password"
+            }, ensure_ascii=False),
+            status_code=400,
+            mimetype="application/json"
+        )
+
+    if not new_password:
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Missing new password"
+            }, ensure_ascii=False),
+            status_code=400,
+            mimetype="application/json"
+        )
+
+    # =========================================================
+    # DATABASE
+    # =========================================================
+
+    try:
+        connection_string = os.environ["SQL_CONNECTION_STRING"]
+
+        with pyodbc.connect(
+            connection_string,
+            timeout=10
+        ) as conn:
+
+            cursor = conn.cursor()
+
+            cursor.execute(
+                """
+                SELECT
+                    us_id,
+                    us_nicname,
+                    us_password_hash,
+                    us_active
+                FROM dbo.users
+                WHERE us_id = ?
+                  AND us_nicname <> N'guest'
+                """,
+                user_id
+            )
+
+            row = cursor.fetchone()
+
+            # -------------------------------------------------
+            # Пользователь не найден
+            # -------------------------------------------------
+
+            if row is None:
+                return func.HttpResponse(
+                    json.dumps({
+                        "error": "User not found"
+                    }, ensure_ascii=False),
+                    status_code=404,
+                    mimetype="application/json"
+                )
+
+            user_id = row[0]
+            nickname = row[1]
+            password_hash = row[2]
+            active = row[3]
+
+            # -------------------------------------------------
+            # Проверка активности
+            # -------------------------------------------------
+
+            if not active:
+                return func.HttpResponse(
+                    json.dumps({
+                        "error": "User account is inactive"
+                    }, ensure_ascii=False),
+                    status_code=403,
+                    mimetype="application/json"
+                )
+
+            # -------------------------------------------------
+            # Проверка текущего пароля
+            # -------------------------------------------------
+
+            if not password_hash:
+                return func.HttpResponse(
+                    json.dumps({
+                        "error": "Current password is invalid"
+                    }, ensure_ascii=False),
+                    status_code=401,
+                    mimetype="application/json"
+                )
+
+            if not verify_password(
+                current_password,
+                password_hash
+            ):
+                return func.HttpResponse(
+                    json.dumps({
+                        "error": "Current password is incorrect"
+                    }, ensure_ascii=False),
+                    status_code=401,
+                    mimetype="application/json"
+                )
+
+            # -------------------------------------------------
+            # Новый пароль
+            # -------------------------------------------------
+
+            try:
+                new_password_hash = hash_password(
+                    new_password
+                )
+
+            except Exception:
+                logging.exception(
+                    "Password hashing failed"
+                )
+
+                return func.HttpResponse(
+                    json.dumps({
+                        "error": "Password hashing failed"
+                    }, ensure_ascii=False),
+                    status_code=500,
+                    mimetype="application/json"
+                )
+
+            # -------------------------------------------------
+            # Изменение пароля
+            # -------------------------------------------------
+
+            cursor.execute(
+                """
+                EXEC dbo.sp_change_user_password
+                    @us_id = ?,
+                    @us_password_hash = ?
+                """,
+                user_id,
+                new_password_hash
+            )
+
+            result = cursor.fetchone()
+
+            if result is None:
+                return func.HttpResponse(
+                    json.dumps({
+                        "error": "Password was not changed"
+                    }, ensure_ascii=False),
+                    status_code=500,
+                    mimetype="application/json"
+                )
+
+            conn.commit()
+
+            # -------------------------------------------------
+            # Успешное изменение
+            # -------------------------------------------------
+
+            return func.HttpResponse(
+                json.dumps({
+                    "user_id": user_id,
+                    "nickname": nickname,
+                    "message": "Password changed successfully"
+                }, ensure_ascii=False),
+                status_code=200,
+                mimetype="application/json"
+            )
+
+    except pyodbc.Error as e:
+
+        logging.exception(
+            "POST /api/change-password database error"
+        )
+
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Database error",
+                "message": str(e)
+            }, ensure_ascii=False),
+            status_code=500,
+            mimetype="application/json"
+        )
+
+    except Exception as e:
+
+        logging.exception(
+            "POST /api/change-password failed"
+        )
+
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Internal server error",
+                "message": str(e)
+            }, ensure_ascii=False),
+            status_code=500,
+            mimetype="application/json"
+        )
+
+
 @app.route(route="hello")
 def hello(req: func.HttpRequest) -> func.HttpResponse:
     logging.info('Python HTTP trigger function processed a request.')
@@ -1153,6 +1410,574 @@ def update_set(req: func.HttpRequest) -> func.HttpResponse:
                 "error": "Internal server error",
                 "message": str(e)
             }, ensure_ascii=False),
+            status_code=500,
+            mimetype="application/json"
+        )
+
+@app.route(route="sets/{set_id}", methods=["DELETE"])
+def delete_set(req: func.HttpRequest) -> func.HttpResponse:
+    logging.info("DELETE /api/sets/{set_id}")
+
+    # =========================================================
+    # API KEY
+    # =========================================================
+
+    if not check_api_key(req):
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Unauthorized"
+            }, ensure_ascii=False),
+            status_code=401,
+            mimetype="application/json"
+        )
+
+    # =========================================================
+    # SET ID
+    # =========================================================
+
+    set_id = req.route_params.get("set_id")
+
+    if not set_id:
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Missing set_id"
+            }, ensure_ascii=False),
+            status_code=400,
+            mimetype="application/json"
+        )
+
+    try:
+        set_id = int(set_id)
+    except ValueError:
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Invalid set_id"
+            }, ensure_ascii=False),
+            status_code=400,
+            mimetype="application/json"
+        )
+
+    # =========================================================
+    # DATABASE
+    # =========================================================
+
+    try:
+        connection_string = os.environ["SQL_CONNECTION_STRING"]
+
+        with pyodbc.connect(
+            connection_string,
+            timeout=10
+        ) as conn:
+
+            cursor = conn.cursor()
+
+            cursor.execute(
+                """
+                EXEC dbo.sp_delete_set
+                    @se_id = ?
+                """,
+                set_id
+            )
+
+            row = cursor.fetchone()
+
+            if row is None:
+                return func.HttpResponse(
+                    json.dumps({
+                        "error": "Set was not deleted"
+                    }, ensure_ascii=False),
+                    status_code=500,
+                    mimetype="application/json"
+                )
+
+            columns = [
+                column[0]
+                for column in cursor.description
+            ]
+
+            deleted_set = dict(
+                zip(columns, row)
+            )
+
+            return func.HttpResponse(
+                json.dumps({
+                    "set_id": deleted_set["se_id"],
+                    "deleted": True
+                }, ensure_ascii=False),
+                status_code=200,
+                mimetype="application/json"
+            )
+
+    except pyodbc.Error as e:
+
+        logging.exception(
+            "DELETE /api/sets/{set_id} database error"
+        )
+
+        error_message = str(e)
+
+        # =====================================================
+        # SET NOT FOUND
+        # =====================================================
+
+        if "(50001)" in error_message:
+            return func.HttpResponse(
+                json.dumps({
+                    "error": "Set not found",
+                    "set_id": set_id
+                }, ensure_ascii=False),
+                status_code=404,
+                mimetype="application/json"
+            )
+
+        # =====================================================
+        # UNKNOWN DATABASE ERROR
+        # =====================================================
+
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Database error",
+                "message": error_message
+            }, ensure_ascii=False),
+            status_code=500,
+            mimetype="application/json"
+        )
+
+    except Exception as e:
+
+        logging.exception(
+            "DELETE /api/sets/{set_id} failed"
+        )
+
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Internal server error",
+                "message": str(e)
+            }, ensure_ascii=False),
+            status_code=500,
+            mimetype="application/json"
+        )
+
+@app.route(
+    route="sets/{set_id}/mobile-audio/start",
+    methods=["POST"]
+)
+def start_mobile_audio_preparation(
+    req: func.HttpRequest
+) -> func.HttpResponse:
+    logging.info("POST /api/sets/{set_id}/mobile-audio/start")
+
+    # Проверка API-ключа
+    if not check_api_key(req):
+        return func.HttpResponse(
+            json.dumps({"error": "Unauthorized"}),
+            status_code=401,
+            mimetype="application/json"
+        )
+
+    # Получение set_id из URL
+    set_id = req.route_params.get("set_id")
+
+    try:
+        set_id = int(set_id)
+    except (TypeError, ValueError):
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Invalid set_id"
+            }, ensure_ascii=False),
+            status_code=400,
+            mimetype="application/json"
+        )
+
+    try:
+        connection_string = os.environ["SQL_CONNECTION_STRING"]
+
+        with pyodbc.connect(
+            connection_string,
+            timeout=10
+        ) as conn:
+            cursor = conn.cursor()
+
+            # Проверяем, что набор существует и активен
+            cursor.execute(
+                """
+                SELECT 1
+                FROM dbo.sets
+                WHERE se_id = ?
+                  AND se_active = 1
+                """,
+                set_id
+            )
+
+            if cursor.fetchone() is None:
+                return func.HttpResponse(
+                    json.dumps({
+                        "error": "Set not found or inactive",
+                        "set_id": set_id
+                    }, ensure_ascii=False),
+                    status_code=404,
+                    mimetype="application/json"
+                )
+
+            # Сбрасываем отметку готовности
+            cursor.execute(
+                """
+                UPDATE dbo.sets
+                SET se_mobile_audio_ready_at = NULL
+                WHERE se_id = ?
+                  AND se_active = 1
+                """,
+                set_id
+            )
+
+        return func.HttpResponse(
+            json.dumps({
+                "set_id": set_id,
+                "message": "Mobile audio preparation started"
+            }, ensure_ascii=False),
+            status_code=200,
+            mimetype="application/json"
+        )
+
+    except Exception:
+        logging.exception(
+            "POST /api/sets/{set_id}/mobile-audio/start failed"
+        )
+
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Database error"
+            }, ensure_ascii=False),
+            status_code=500,
+            mimetype="application/json"
+        )
+
+@app.route(
+    route="sets/{set_id}/mobile-audio/items",
+    methods=["GET"]
+)
+def get_set_mobile_audio_items(
+    req: func.HttpRequest
+) -> func.HttpResponse:
+    logging.info(
+        "GET /api/sets/{set_id}/mobile-audio/items"
+    )
+
+    if not check_api_key(req):
+        return func.HttpResponse(
+            json.dumps({"error": "Unauthorized"}),
+            status_code=401,
+            mimetype="application/json"
+        )
+
+    set_id = req.route_params.get("set_id")
+
+    try:
+        set_id = int(set_id)
+    except (TypeError, ValueError):
+        return func.HttpResponse(
+            json.dumps({"error": "Invalid set_id"}),
+            status_code=400,
+            mimetype="application/json"
+        )
+
+    try:
+        connection_string = os.environ["SQL_CONNECTION_STRING"]
+
+        with pyodbc.connect(
+            connection_string,
+            timeout=10
+        ) as conn:
+            cursor = conn.cursor()
+
+            # Проверяем, что набор доступен пользователю.
+            cursor.execute(
+                """
+                SELECT 1
+                FROM vw_sets
+                WHERE set_id = ?
+                """,
+                set_id
+            )
+
+            if cursor.fetchone() is None:
+                return func.HttpResponse(
+                    json.dumps({
+                        "error": "Set not found or access denied",
+                        "set_id": set_id
+                    }, ensure_ascii=False),
+                    status_code=404,
+                    mimetype="application/json"
+                )
+
+            # Получаем данные для подготовки мобильного аудио.
+            cursor.execute(
+                """
+                EXEC dbo.sp_get_set_mobile_audio_json
+                    @set_id = ?
+                """,
+                set_id
+            )
+
+            row = cursor.fetchone()
+
+            if row is None or row[0] is None:
+                raise RuntimeError(
+                    "Mobile audio JSON was not returned"
+                )
+
+            json_result = row[0]
+
+        return func.HttpResponse(
+            json_result,
+            status_code=200,
+            mimetype="application/json"
+        )
+
+    except Exception:
+        logging.exception(
+            "GET /api/sets/{set_id}/mobile-audio/items failed"
+        )
+
+        return func.HttpResponse(
+            json.dumps({"error": "Database error"}),
+            status_code=500,
+            mimetype="application/json"
+        )
+
+@app.route(
+    route="sets/{set_id}/items/{si_id}/mobile-audio",
+    methods=["PUT"]
+)
+def upload_mobile_audio(
+    req: func.HttpRequest
+) -> func.HttpResponse:
+    logging.info(
+        "PUT /api/sets/{set_id}/items/{si_id}/mobile-audio"
+    )
+
+    if not check_api_key(req):
+        return func.HttpResponse(
+            json.dumps({"error": "Unauthorized"}),
+            status_code=401,
+            mimetype="application/json"
+        )
+
+    try:
+        set_id = int(req.route_params.get("set_id"))
+        si_id = int(req.route_params.get("si_id"))
+    except (TypeError, ValueError):
+        return func.HttpResponse(
+            json.dumps({"error": "Invalid set_id or si_id"}),
+            status_code=400,
+            mimetype="application/json"
+        )
+
+    phrase_file = req.files.get("phrase_audio")
+    translate_file = req.files.get("translate_audio")
+
+    if phrase_file is None:
+        return func.HttpResponse(
+            json.dumps({
+                "error": "phrase_audio is required"
+            }),
+            status_code=400,
+            mimetype="application/json"
+        )
+
+    try:
+        phrase_audio = phrase_file.read()
+        translate_audio = (
+            translate_file.read()
+            if translate_file is not None
+            else None
+        )
+
+        if not phrase_audio:
+            return func.HttpResponse(
+                json.dumps({
+                    "error": "phrase_audio is empty"
+                }),
+                status_code=400,
+                mimetype="application/json"
+            )
+
+        connection_string = os.environ["SQL_CONNECTION_STRING"]
+
+        with pyodbc.connect(
+            connection_string,
+            timeout=10
+        ) as conn:
+            cursor = conn.cursor()
+
+            # Проверяем доступ к набору.
+            cursor.execute(
+                """
+                SELECT 1
+                FROM vw_sets
+                WHERE set_id = ?
+                """,
+                set_id
+            )
+
+            if cursor.fetchone() is None:
+                return func.HttpResponse(
+                    json.dumps({
+                        "error": "Set not found or access denied",
+                        "set_id": set_id
+                    }, ensure_ascii=False),
+                    status_code=404,
+                    mimetype="application/json"
+                )
+
+            # Обновляем только указанный элемент этого набора.
+            cursor.execute(
+                """
+                UPDATE dbo.set_items
+                SET
+                    si_mobile_phrase_audio = ?,
+                    si_mobile_translate_audio = ?
+                WHERE si_id = ?
+                  AND si_set = ?
+                """,
+                pyodbc.Binary(phrase_audio),
+                (
+                    pyodbc.Binary(translate_audio)
+                    if translate_audio is not None
+                    else None
+                ),
+                si_id,
+                set_id
+            )
+
+            if cursor.rowcount == 0:
+                return func.HttpResponse(
+                    json.dumps({
+                        "error": "Set item not found",
+                        "set_id": set_id,
+                        "si_id": si_id
+                    }, ensure_ascii=False),
+                    status_code=404,
+                    mimetype="application/json"
+                )
+
+        return func.HttpResponse(
+            json.dumps({
+                "set_id": set_id,
+                "si_id": si_id,
+                "message": "Mobile audio saved"
+            }, ensure_ascii=False),
+            status_code=200,
+            mimetype="application/json"
+        )
+
+    except Exception:
+        logging.exception(
+            "PUT /api/sets/{set_id}/items/{si_id}/mobile-audio failed"
+        )
+
+        return func.HttpResponse(
+            json.dumps({"error": "Database error"}),
+            status_code=500,
+            mimetype="application/json"
+        )
+
+
+@app.route(
+    route="sets/{set_id}/mobile-audio/finish",
+    methods=["POST"]
+)
+def finish_mobile_audio_preparation(
+    req: func.HttpRequest
+) -> func.HttpResponse:
+    logging.info(
+        "POST /api/sets/{set_id}/mobile-audio/finish"
+    )
+
+    if not check_api_key(req):
+        return func.HttpResponse(
+            json.dumps({"error": "Unauthorized"}),
+            status_code=401,
+            mimetype="application/json"
+        )
+
+    set_id = req.route_params.get("set_id")
+
+    try:
+        set_id = int(set_id)
+    except (TypeError, ValueError):
+        return func.HttpResponse(
+            json.dumps({"error": "Invalid set_id"}),
+            status_code=400,
+            mimetype="application/json"
+        )
+
+    try:
+        connection_string = os.environ["SQL_CONNECTION_STRING"]
+
+        with pyodbc.connect(
+            connection_string,
+            timeout=10
+        ) as conn:
+            cursor = conn.cursor()
+
+            # Проверяем доступ к набору.
+            cursor.execute(
+                """
+                SELECT 1
+                FROM vw_sets
+                WHERE set_id = ?
+                """,
+                set_id
+            )
+
+            if cursor.fetchone() is None:
+                return func.HttpResponse(
+                    json.dumps({
+                        "error": "Set not found or access denied",
+                        "set_id": set_id
+                    }, ensure_ascii=False),
+                    status_code=404,
+                    mimetype="application/json"
+                )
+
+            # Отмечаем завершение подготовки.
+            cursor.execute(
+                """
+                UPDATE dbo.sets
+                SET se_mobile_audio_ready_at = SYSDATETIME()
+                WHERE se_id = ?
+                  AND se_active = 1
+                """,
+                set_id
+            )
+
+            if cursor.rowcount == 0:
+                return func.HttpResponse(
+                    json.dumps({
+                        "error": "Set not found or inactive",
+                        "set_id": set_id
+                    }, ensure_ascii=False),
+                    status_code=404,
+                    mimetype="application/json"
+                )
+
+        return func.HttpResponse(
+            json.dumps({
+                "set_id": set_id,
+                "message": "Mobile audio preparation completed"
+            }, ensure_ascii=False),
+            status_code=200,
+            mimetype="application/json"
+        )
+
+    except Exception:
+        logging.exception(
+            "POST /api/sets/{set_id}/mobile-audio/finish failed"
+        )
+
+        return func.HttpResponse(
+            json.dumps({"error": "Database error"}),
             status_code=500,
             mimetype="application/json"
         )
