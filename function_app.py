@@ -832,6 +832,124 @@ def get_sets(req: func.HttpRequest) -> func.HttpResponse:
             mimetype="application/json"
         )
     
+@app.route(route="mobile/sets", methods=["GET"])
+def get_mobile_ready_sets(req: func.HttpRequest) -> func.HttpResponse:
+    logging.info("GET /api/mobile/sets")
+
+    # =========================================================
+    # API KEY
+    # =========================================================
+
+    if not check_api_key(req):
+        return func.HttpResponse(
+            json.dumps({"error": "Unauthorized"}),
+            status_code=401,
+            mimetype="application/json"
+        )
+
+    # =========================================================
+    # PARAMETERS
+    # =========================================================
+
+    user_id = req.params.get("user_id")
+
+    if not user_id:
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Missing user_id"
+            }, ensure_ascii=False),
+            status_code=400,
+            mimetype="application/json"
+        )
+
+    try:
+        user_id = int(user_id)
+    except ValueError:
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Invalid user_id"
+            }, ensure_ascii=False),
+            status_code=400,
+            mimetype="application/json"
+        )
+
+    # =========================================================
+    # DATABASE
+    # =========================================================
+
+    try:
+        connection_string = os.environ["SQL_CONNECTION_STRING"]
+
+        with pyodbc.connect(
+            connection_string,
+            timeout=10
+        ) as conn:
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                SELECT
+                    v.set_id,
+                    v.user_id,
+                    v.user_nickname,
+                    v.set_index,
+                    v.set_name,
+                    v.set_description,
+                    v.set_active,
+                    v.set_create_date,
+                    v.set_update_date,
+                    v.items_count,
+                    s.se_mobile_audio_ready_at
+                        AS mobile_audio_ready_at
+                FROM vw_sets AS v
+                INNER JOIN dbo.sets AS s
+                    ON s.se_id = v.set_id
+                WHERE v.user_id = ?
+                  AND s.se_mobile_audio_ready_at IS NOT NULL
+                ORDER BY v.set_index
+            """, user_id)
+
+            columns = [
+                column[0]
+                for column in cursor.description
+            ]
+
+            rows = []
+
+            for row in cursor.fetchall():
+                item = dict(zip(columns, row))
+
+                for date_field in (
+                    "set_create_date",
+                    "set_update_date",
+                    "mobile_audio_ready_at"
+                ):
+                    if item[date_field] is not None:
+                        item[date_field] = (
+                            item[date_field].isoformat()
+                        )
+
+                rows.append(item)
+
+            return func.HttpResponse(
+                json.dumps(rows, ensure_ascii=False),
+                status_code=200,
+                mimetype="application/json"
+            )
+
+    except Exception as e:
+        logging.exception(
+            "GET /api/mobile/sets failed"
+        )
+
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Database error",
+                "message": str(e)
+            }, ensure_ascii=False),
+            status_code=500,
+            mimetype="application/json"
+        )
+
 @app.route(route="sets/{set_id}", methods=["GET"])
 def get_set(req: func.HttpRequest) -> func.HttpResponse:
     logging.info("GET /api/sets/{set_id}")
