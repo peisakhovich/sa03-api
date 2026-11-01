@@ -2001,6 +2001,131 @@ def upload_mobile_audio(
         )
 
 
+
+@app.route(
+    route="sets/{set_id}/items/{si_id}/mobile-audio/{audio_type}",
+    methods=["GET"]
+)
+def download_mobile_audio(
+    req: func.HttpRequest
+) -> func.HttpResponse:
+    """Download phrase or translation MP3 for one set item."""
+
+    logging.info(
+        "GET /api/sets/{set_id}/items/{si_id}/mobile-audio/{audio_type}"
+    )
+
+    if not check_api_key(req):
+        return func.HttpResponse(
+            json.dumps({"error": "Unauthorized"}),
+            status_code=401,
+            mimetype="application/json"
+        )
+
+    try:
+        set_id = int(req.route_params.get("set_id"))
+        si_id = int(req.route_params.get("si_id"))
+    except (TypeError, ValueError):
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Invalid set_id or si_id"
+            }, ensure_ascii=False),
+            status_code=400,
+            mimetype="application/json"
+        )
+
+    audio_type = req.route_params.get("audio_type")
+
+    audio_columns = {
+        "phrase": "si_mobile_phrase_audio",
+        "translate": "si_mobile_translate_audio"
+    }
+
+    audio_column = audio_columns.get(audio_type)
+
+    if audio_column is None:
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Invalid audio_type",
+                "allowed_values": ["phrase", "translate"]
+            }, ensure_ascii=False),
+            status_code=400,
+            mimetype="application/json"
+        )
+
+    try:
+        connection_string = os.environ["SQL_CONNECTION_STRING"]
+
+        with pyodbc.connect(
+            connection_string,
+            timeout=10
+        ) as conn:
+            cursor = conn.cursor()
+
+            # Проверяем принадлежность элемента указанному набору.
+            # Имя столбца берётся только из audio_columns выше.
+            query = f"""
+                SELECT {audio_column}
+                FROM dbo.set_items
+                WHERE si_id = ?
+                  AND si_set = ?
+            """
+
+            cursor.execute(query, si_id, set_id)
+            row = cursor.fetchone()
+
+            if row is None:
+                return func.HttpResponse(
+                    json.dumps({
+                        "error": "Set item not found",
+                        "set_id": set_id,
+                        "si_id": si_id
+                    }, ensure_ascii=False),
+                    status_code=404,
+                    mimetype="application/json"
+                )
+
+            audio_data = row[0]
+
+            if audio_data is None or len(audio_data) == 0:
+                return func.HttpResponse(
+                    json.dumps({
+                        "error": "Audio not found",
+                        "set_id": set_id,
+                        "si_id": si_id,
+                        "audio_type": audio_type
+                    }, ensure_ascii=False),
+                    status_code=404,
+                    mimetype="application/json"
+                )
+
+            # pyodbc может вернуть bytes или memoryview.
+            audio_bytes = bytes(audio_data)
+
+        return func.HttpResponse(
+            body=audio_bytes,
+            status_code=200,
+            mimetype="audio/mpeg",
+            headers={
+                "Content-Disposition":
+                    f'attachment; filename="{si_id}_{audio_type}.mp3"',
+                "Cache-Control": "private, no-store"
+            }
+        )
+
+    except Exception:
+        logging.exception(
+            "GET mobile audio download failed: set_id=%s, si_id=%s",
+            set_id,
+            si_id
+        )
+
+        return func.HttpResponse(
+            json.dumps({"error": "Database error"}),
+            status_code=500,
+            mimetype="application/json"
+        )
+
 @app.route(
     route="sets/{set_id}/mobile-audio/finish",
     methods=["POST"]
