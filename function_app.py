@@ -779,19 +779,23 @@ def get_sets(req: func.HttpRequest) -> func.HttpResponse:
 
             cursor.execute("""
                 SELECT
-                    set_id,
-                    user_id,
-                    user_nickname,
-                    set_index,
-                    set_name,
-                    set_description,
-                    set_active,
-                    set_create_date,
-                    set_update_date,
-                    items_count
-                FROM vw_sets
-                WHERE user_id = ?
-                ORDER BY set_index
+                    v.set_id,
+                    v.user_id,
+                    v.user_nickname,
+                    v.set_index,
+                    v.set_name,
+                    v.set_description,
+                    v.set_active,
+                    v.set_create_date,
+                    v.set_update_date,
+                    v.items_count,
+                    s.se_mobile_audio_ready_at
+                        AS mobile_audio_ready_at
+                FROM vw_sets AS v
+                INNER JOIN dbo.sets AS s
+                    ON s.se_id = v.set_id
+                WHERE v.user_id = ?
+                ORDER BY v.set_index
             """, user_id)
 
             columns = [column[0] for column in cursor.description]
@@ -802,15 +806,15 @@ def get_sets(req: func.HttpRequest) -> func.HttpResponse:
                 item = dict(zip(columns, row))
 
                 # datetime2 → строка JSON
-                if item["set_create_date"] is not None:
-                    item["set_create_date"] = (
-                        item["set_create_date"].isoformat()
-                    )
-
-                if item["set_update_date"] is not None:
-                    item["set_update_date"] = (
-                        item["set_update_date"].isoformat()
-                    )
+                for date_field in (
+                    "set_create_date",
+                    "set_update_date",
+                    "mobile_audio_ready_at"
+                ):
+                    if item[date_field] is not None:
+                        item[date_field] = (
+                            item[date_field].isoformat()
+                        )
 
                 rows.append(item)
 
