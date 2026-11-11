@@ -5,6 +5,7 @@ import pyodbc
 import azure.functions as func
 from password import hash_password
 from password import verify_password
+from voice_assessment import assess_pronunciation, VoiceAssessmentError
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 
@@ -2228,3 +2229,86 @@ def finish_mobile_audio_preparation(
             status_code=500,
             mimetype="application/json"
         )
+
+
+@app.route(route="voice-test", methods=["POST"])
+def voice_test(req: func.HttpRequest) -> func.HttpResponse:
+    """Evaluate a spoken phrase using Azure Speech Pronunciation Assessment."""
+
+    logging.info("POST /api/voice-test")
+
+    if not check_api_key(req):
+        return func.HttpResponse(
+            json.dumps({
+                "success": False,
+                "error": {
+                    "code": "unauthorized",
+                    "message": "Unauthorized"
+                }
+            }, ensure_ascii=False),
+            status_code=401,
+            mimetype="application/json"
+        )
+
+    try:
+        reference_text = req.form.get("reference_text")
+        locale = req.form.get("locale")
+        audio_file = req.files.get("audio")
+        audio_bytes = audio_file.read() if audio_file is not None else None
+
+        result = assess_pronunciation(
+            reference_text=reference_text,
+            locale=locale,
+            audio_bytes=audio_bytes,
+        )
+
+        return func.HttpResponse(
+            json.dumps(result, ensure_ascii=False),
+            status_code=200,
+            mimetype="application/json"
+        )
+
+    except VoiceAssessmentError as error:
+        return func.HttpResponse(
+            json.dumps({
+                "success": False,
+                "error": {
+                    "code": error.code,
+                    "message": error.message
+                }
+            }, ensure_ascii=False),
+            status_code=error.status_code,
+            mimetype="application/json"
+        )
+
+    except (ValueError, TypeError):
+        logging.warning("POST /api/voice-test received invalid multipart data")
+        return func.HttpResponse(
+            json.dumps({
+                "success": False,
+                "error": {
+                    "code": "invalid_multipart_request",
+                    "message": (
+                        "Request must be multipart/form-data with "
+                        "reference_text, locale and audio fields."
+                    )
+                }
+            }, ensure_ascii=False),
+            status_code=400,
+            mimetype="application/json"
+        )
+
+    except Exception:
+        logging.exception("POST /api/voice-test failed")
+        return func.HttpResponse(
+            json.dumps({
+                "success": False,
+                "error": {
+                    "code": "internal_error",
+                    "message": "Internal server error."
+                }
+            }, ensure_ascii=False),
+            status_code=500,
+            mimetype="application/json"
+        )
+
