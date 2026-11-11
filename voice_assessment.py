@@ -195,6 +195,7 @@ def _build_endpoint(region: str, locale: str) -> str:
 
 
 def _count_word_errors(words: list) -> dict:
+    """Count Azure word-level miscues from the ErrorType field."""
     counts = {
         "mispronunciations": 0,
         "omissions": 0,
@@ -211,17 +212,42 @@ def _count_word_errors(words: list) -> dict:
         if not isinstance(word, dict):
             continue
 
-        assessment = word.get("PronunciationAssessment")
-        if not isinstance(assessment, dict):
-            continue
-
-        error_type = assessment.get("ErrorType")
-        target = error_type_map.get(error_type)
-
+        target = error_type_map.get(word.get("ErrorType"))
         if target:
             counts[target] += 1
 
     return counts
+
+
+def _normalize_words(words: list) -> list[dict]:
+    """Convert Azure word results into a stable API response structure."""
+    normalized = []
+
+    for item in words:
+        if not isinstance(item, dict):
+            continue
+
+        offset = item.get("Offset")
+        duration = item.get("Duration")
+
+        normalized.append({
+            "word": item.get("Word", ""),
+            "accuracy_score": item.get("AccuracyScore"),
+            "error_type": item.get("ErrorType", "None"),
+            "offset_ms": (
+                round(offset / 10000, 2)
+                if isinstance(offset, (int, float))
+                else None
+            ),
+            "duration_ms": (
+                round(duration / 10000, 2)
+                if isinstance(duration, (int, float))
+                else None
+            ),
+            "confidence": item.get("Confidence"),
+        })
+
+    return normalized
 
 
 def _azure_error_message(status_code: int) -> tuple[str, str, int]:
@@ -371,10 +397,7 @@ def assess_pronunciation(
             502,
         )
 
-    pronunciation = best_result.get("PronunciationAssessment")
-    if not isinstance(pronunciation, dict):
-        pronunciation = {}
-
+    # Azure returns the overall assessment scores directly in NBest[0].
     words = best_result.get("Words")
     if not isinstance(words, list):
         words = []
@@ -382,14 +405,14 @@ def assess_pronunciation(
     return {
         "success": True,
         "assessment": {
-            "pronunciation_score": pronunciation.get("PronScore"),
-            "accuracy_score": pronunciation.get("AccuracyScore"),
-            "fluency_score": pronunciation.get("FluencyScore"),
-            "completeness_score": pronunciation.get("CompletenessScore"),
+            "pronunciation_score": best_result.get("PronScore"),
+            "accuracy_score": best_result.get("AccuracyScore"),
+            "fluency_score": best_result.get("FluencyScore"),
+            "completeness_score": best_result.get("CompletenessScore"),
         },
         "recognized_text": best_result.get("Display", ""),
         "errors": _count_word_errors(words),
-        "words": [],
+        "words": _normalize_words(words),
         "metadata": {
             "locale": locale,
             "assessment_version": ASSESSMENT_VERSION,
