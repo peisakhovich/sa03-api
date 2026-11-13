@@ -6,7 +6,7 @@ import azure.functions as func
 from password import hash_password
 from password import verify_password
 from voice_assessment import assess_pronunciation, VoiceAssessmentError
-from speech_recognition import recognize_speech
+from voice_recognition import recognize_speech
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 
