@@ -7,6 +7,7 @@ from password import hash_password
 from password import verify_password
 from voice_assessment import assess_pronunciation, VoiceAssessmentError
 from voice_recognition import recognize_speech
+from voice_comparison import compare_transcription
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 
@@ -2262,6 +2263,38 @@ def voice_test(req: func.HttpRequest) -> func.HttpResponse:
             locale=locale,
             audio_bytes=audio_bytes,
         )
+
+        # Standard STT is supplementary: a failure here must not discard
+        # a successful Pronunciation Assessment result.
+        try:
+            standard_result = recognize_speech(
+                locale=locale,
+                audio_bytes=audio_bytes,
+            )
+            result["standard_recognition"] = standard_result
+            result["comparison"] = compare_transcription(
+                reference_text=reference_text,
+                recognition=standard_result,
+            )
+        except VoiceAssessmentError as error:
+            logging.warning(
+                "Supplementary standard recognition failed: code=%s",
+                error.code,
+            )
+            result["standard_recognition"] = {
+                "success": False,
+                "error": {
+                    "code": error.code,
+                    "message": error.message,
+                },
+            }
+            result["comparison"] = {
+                "success": False,
+                "error": {
+                    "code": "standard_recognition_unavailable",
+                    "message": "Text comparison could not be completed.",
+                },
+            }
 
         return func.HttpResponse(
             json.dumps(result, ensure_ascii=False),
