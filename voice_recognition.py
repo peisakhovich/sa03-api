@@ -1,26 +1,25 @@
-"""Azure Speech standard speech-to-text REST integration.
+"""Azure Speech standard speech-to-text integration using the Speech SDK.
 
-This module deliberately uses the same Speech resource and audio validation
-as Pronunciation Assessment, but sends no Pronunciation-Assessment header.
+This module recognizes speech without a reference transcript and requests
+word-level timestamps. Pronunciation Assessment remains implemented separately.
 """
 
 import json
 import logging
 import os
-import urllib.error
-import urllib.request
+import tempfile
+
+import azure.cognitiveservices.speech as speechsdk
 
 from voice_assessment import (
-    AZURE_TIMEOUT_SECONDS,
     VoiceAssessmentError,
-    _build_endpoint,
     _load_supported_locales,
     _validate_audio,
 )
 
 
 def _normalize_words(words: list) -> list[dict]:
-    """Normalize optional word-level timing data returned by Azure STT."""
+    """Normalize Azure detailed word results and convert HNS to milliseconds."""
     normalized = []
 
     for item in words:
@@ -48,8 +47,58 @@ def _normalize_words(words: list) -> list[dict]:
     return normalized
 
 
+def _parse_detailed_result(result) -> tuple[dict, list[dict]]:
+    """Extract the best hypothesis and word timings from the SDK JSON result."""
+    try:
+        payload = json.loads(result.json)
+    except (AttributeError, TypeError, json.JSONDecodeError):
+        logging.exception("Azure Speech SDK returned invalid detailed JSON")
+        raise VoiceAssessmentError(
+            "speech_service_invalid_response",
+            "Azure Speech returned an invalid recognition result.",
+            502,
+        )
+
+    if not isinstance(payload, dict):
+        raise VoiceAssessmentError(
+            "speech_service_invalid_response",
+            "Azure Speech returned an unexpected recognition result.",
+            502,
+        )
+
+    candidates = payload.get("NBest")
+    if not isinstance(candidates, list) or not candidates:
+        logging.warning(
+            "Azure Speech detailed result has no NBest candidates; fields=%s",
+            sorted(payload.keys()),
+        )
+        raise VoiceAssessmentError(
+            "speech_service_invalid_response",
+            "Azure Speech did not return detailed recognition data.",
+            502,
+        )
+
+    best_result = candidates[0]
+    if not isinstance(best_result, dict):
+        raise VoiceAssessmentError(
+            "speech_service_invalid_response",
+            "Azure Speech returned an unexpected recognition candidate.",
+            502,
+        )
+
+    words = best_result.get("Words")
+    if not isinstance(words, list):
+        logging.warning(
+            "Azure Speech detailed result contains no word timings; fields=%s",
+            sorted(best_result.keys()),
+        )
+        words = []
+
+    return best_result, _normalize_words(words)
+
+
 def recognize_speech(locale: str, audio_bytes: bytes) -> dict:
-    """Recognize speech from WAV audio without a reference transcript."""
+    """Recognize a WAV recording without a reference transcript."""
     if not isinstance(locale, str) or not locale.strip():
         raise VoiceAssessmentError(
             "locale_missing",
@@ -79,116 +128,99 @@ def recognize_speech(locale: str, audio_bytes: bytes) -> dict:
             500,
         )
 
-    request = urllib.request.Request(
-        _build_endpoint(speech_region, locale),
-        data=bytes(audio_bytes),
-        headers={
-            "Ocp-Apim-Subscription-Key": speech_key,
-            "Content-Type": (
-                "audio/wav; codecs=audio/pcm; samplerate=16000"
-            ),
-            "Accept": "application/json",
-        },
-        method="POST",
-    )
+    temp_path = None
 
     try:
-        with urllib.request.urlopen(
-            request,
-            timeout=AZURE_TIMEOUT_SECONDS,
-        ) as response:
-            response_body = response.read()
+        # The SDK file input accepts a path. Use a temporary WAV file and
+        # always remove it after recognition.
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            suffix=".wav",
+            delete=False,
+        ) as audio_file:
+            audio_file.write(bytes(audio_bytes))
+            temp_path = audio_file.name
 
-    except urllib.error.HTTPError as error:
-        if error.code in (401, 403):
-            code, message, status = (
-                "speech_service_auth_error",
-                "Azure Speech authentication failed. Check the Speech resource key and region.",
-                502,
-            )
-        elif error.code == 429:
-            code, message, status = (
-                "speech_service_rate_limited",
-                "Azure Speech request limit was reached. Please try again later.",
-                503,
-            )
-        elif error.code == 400:
-            code, message, status = (
-                "speech_service_bad_request",
-                "Azure Speech rejected the recognition request.",
-                502,
-            )
-        else:
-            code, message, status = (
-                "speech_service_error",
-                "Azure Speech could not complete speech recognition.",
-                502,
-            )
-
-        logging.warning(
-            "Azure Speech returned HTTP %s for standard recognition, locale %s",
-            error.code,
-            locale,
+        speech_config = speechsdk.SpeechConfig(
+            subscription=speech_key,
+            region=speech_region,
         )
-        raise VoiceAssessmentError(code, message, status)
+        speech_config.speech_recognition_language = locale
+        speech_config.request_word_level_timestamps()
 
-    except (urllib.error.URLError, TimeoutError, OSError):
-        logging.exception("Azure Speech recognition request failed")
+        audio_config = speechsdk.audio.AudioConfig(filename=temp_path)
+        recognizer = speechsdk.SpeechRecognizer(
+            speech_config=speech_config,
+            audio_config=audio_config,
+        )
+
+        result = recognizer.recognize_once()
+
+    except Exception:
+        logging.exception("Azure Speech SDK recognition request failed")
         raise VoiceAssessmentError(
             "speech_service_unavailable",
             "Azure Speech service is temporarily unavailable.",
             502,
         )
 
-    try:
-        azure_result = json.loads(response_body.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        logging.error("Azure Speech returned invalid JSON for recognition")
-        raise VoiceAssessmentError(
-            "speech_service_invalid_response",
-            "Azure Speech returned an invalid response.",
-            502,
-        )
+    finally:
+        if temp_path:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                logging.warning("Unable to remove temporary speech audio file")
 
-    if not isinstance(azure_result, dict):
-        raise VoiceAssessmentError(
-            "speech_service_invalid_response",
-            "Azure Speech returned an unexpected response.",
-            502,
-        )
-
-    recognition_status = azure_result.get("RecognitionStatus")
-    candidates = azure_result.get("NBest")
-
-    if (
-        recognition_status != "Success"
-        or not isinstance(candidates, list)
-        or not candidates
-        or not isinstance(candidates[0], dict)
-    ):
-        logging.info(
-            "Azure Speech did not recognize speech: status=%s",
-            recognition_status,
-        )
+    if result.reason == speechsdk.ResultReason.NoMatch:
+        logging.info("Azure Speech SDK found no speech for locale %s", locale)
         raise VoiceAssessmentError(
             "no_speech_detected",
             "No speech could be recognized in the recording.",
             422,
         )
 
-    best_result = candidates[0]
-    words = best_result.get("Words")
-    if not isinstance(words, list):
-        words = []
+    if result.reason == speechsdk.ResultReason.Canceled:
+        details = result.cancellation_details
+        logging.warning(
+            "Azure Speech SDK canceled recognition: reason=%s, details=%s",
+            details.reason,
+            details.error_details,
+        )
+        if details.reason == speechsdk.CancellationReason.Error:
+            raise VoiceAssessmentError(
+                "speech_service_error",
+                "Azure Speech could not complete speech recognition.",
+                502,
+            )
+
+        raise VoiceAssessmentError(
+            "no_speech_detected",
+            "No speech could be recognized in the recording.",
+            422,
+        )
+
+    if result.reason != speechsdk.ResultReason.RecognizedSpeech:
+        logging.warning(
+            "Azure Speech SDK returned unexpected result reason: %s",
+            result.reason,
+        )
+        raise VoiceAssessmentError(
+            "speech_service_invalid_response",
+            "Azure Speech returned an unexpected recognition result.",
+            502,
+        )
+
+    best_result, words = _parse_detailed_result(result)
 
     return {
         "success": True,
-        "recognized_text": best_result.get("Display", ""),
+        "recognized_text": result.text,
         "confidence": best_result.get("Confidence"),
-        "words": _normalize_words(words),
+        "words": words,
         "metadata": {
             "locale": locale,
             "recognition_mode": "standard",
-            "recognition_status": recognition_status,
+            "recognition_status": "Success",
+            "recognition_engine": "speech_sdk",
         },
     }
