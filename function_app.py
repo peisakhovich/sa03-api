@@ -2295,6 +2295,22 @@ def voice_test(req: func.HttpRequest) -> func.HttpResponse:
                     "message": "Text comparison could not be completed.",
                 },
             }
+        except Exception:
+            logging.exception("Supplementary speech comparison failed")
+            result["standard_recognition"] = {
+                "success": False,
+                "error": {
+                    "code": "standard_recognition_failed",
+                    "message": "Additional speech recognition failed.",
+                },
+            }
+            result["comparison"] = {
+                "success": False,
+                "error": {
+                    "code": "standard_recognition_unavailable",
+                    "message": "Text comparison could not be completed.",
+                },
+            }
 
         return func.HttpResponse(
             json.dumps(result, ensure_ascii=False),
