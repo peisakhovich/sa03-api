@@ -6,6 +6,7 @@ import azure.functions as func
 from password import hash_password
 from password import verify_password
 from voice_assessment import assess_pronunciation, VoiceAssessmentError
+from speech_recognition import recognize_speech
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 
@@ -2312,3 +2313,84 @@ def voice_test(req: func.HttpRequest) -> func.HttpResponse:
             mimetype="application/json"
         )
 
+
+
+@app.route(route="voice-recognize", methods=["POST"])
+def voice_recognize(req: func.HttpRequest) -> func.HttpResponse:
+    """Transcribe audio using standard Azure Speech-to-Text without a reference."""
+    logging.info("POST /api/voice-recognize")
+
+    if not check_api_key(req):
+        return func.HttpResponse(
+            json.dumps({
+                "success": False,
+                "error": {
+                    "code": "unauthorized",
+                    "message": "Unauthorized"
+                }
+            }, ensure_ascii=False),
+            status_code=401,
+            mimetype="application/json"
+        )
+
+    try:
+        locale = req.form.get("locale")
+        audio_file = req.files.get("audio")
+        audio_bytes = audio_file.read() if audio_file is not None else None
+
+        result = recognize_speech(
+            locale=locale,
+            audio_bytes=audio_bytes,
+        )
+
+        return func.HttpResponse(
+            json.dumps(result, ensure_ascii=False),
+            status_code=200,
+            mimetype="application/json"
+        )
+
+    except VoiceAssessmentError as error:
+        return func.HttpResponse(
+            json.dumps({
+                "success": False,
+                "error": {
+                    "code": error.code,
+                    "message": error.message
+                }
+            }, ensure_ascii=False),
+            status_code=error.status_code,
+            mimetype="application/json"
+        )
+
+    except (ValueError, TypeError):
+        logging.warning(
+            "POST /api/voice-recognize received invalid multipart data"
+        )
+        return func.HttpResponse(
+            json.dumps({
+                "success": False,
+                "error": {
+                    "code": "invalid_multipart_request",
+                    "message": (
+                        "Request must be multipart/form-data with "
+                        "locale and audio fields."
+                    )
+                }
+            }, ensure_ascii=False),
+            status_code=400,
+            mimetype="application/json"
+        )
+
+    except Exception:
+        logging.exception("POST /api/voice-recognize failed")
+        return func.HttpResponse(
+            json.dumps({
+                "success": False,
+                "error": {
+                    "code": "internal_error",
+                    "message": "Internal server error."
+                }
+            }, ensure_ascii=False),
+            status_code=500,
+            mimetype="application/json"
+        )
