@@ -2231,6 +2231,49 @@ def finish_mobile_audio_preparation(
         )
 
 
+@app.route(route="languages/locales", methods=["GET"])
+def get_language_locales(req: func.HttpRequest) -> func.HttpResponse:
+    """Return locales registered in dbo.language."""
+    logging.info("GET /api/languages/locales")
+
+    if not check_api_key(req):
+        return func.HttpResponse(
+            json.dumps({"error": "Unauthorized"}, ensure_ascii=False),
+            status_code=401,
+            mimetype="application/json"
+        )
+
+    try:
+        connection_string = os.environ["SQL_CONNECTION_STRING"]
+
+        with pyodbc.connect(connection_string, timeout=10) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT ln_locale
+                FROM dbo.language
+                ORDER BY ln_locale
+            """)
+
+            locales = [row[0] for row in cursor.fetchall()]
+
+        return func.HttpResponse(
+            json.dumps({"locales": locales}, ensure_ascii=False),
+            status_code=200,
+            mimetype="application/json"
+        )
+
+    except Exception as e:
+        logging.exception("GET /api/languages/locales failed")
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Database error",
+                "message": str(e)
+            }, ensure_ascii=False),
+            status_code=500,
+            mimetype="application/json"
+        )
+
+
 @app.route(route="voices/sync", methods=["POST"])
 def sync_voices(req: func.HttpRequest) -> func.HttpResponse:
     """Synchronize the Edge TTS voice catalog with dbo.voice."""
