@@ -2231,6 +2231,155 @@ def finish_mobile_audio_preparation(
         )
 
 
+@app.route(route="voices/sync", methods=["POST"])
+def sync_voices(req: func.HttpRequest) -> func.HttpResponse:
+    """Synchronize the Edge TTS voice catalog with dbo.voice."""
+
+    logging.info("POST /api/voices/sync")
+
+    if not check_api_key(req):
+        return func.HttpResponse(
+            json.dumps({"error": "Unauthorized"}, ensure_ascii=False),
+            status_code=401,
+            mimetype="application/json"
+        )
+
+    # =========================================================
+    # JSON BODY
+    # =========================================================
+
+    try:
+        body = req.get_json()
+    except ValueError:
+        return func.HttpResponse(
+            json.dumps({"error": "Invalid JSON"}, ensure_ascii=False),
+            status_code=400,
+            mimetype="application/json"
+        )
+
+    if not isinstance(body, dict):
+        return func.HttpResponse(
+            json.dumps({
+                "error": "JSON body must be an object"
+            }, ensure_ascii=False),
+            status_code=400,
+            mimetype="application/json"
+        )
+
+    voices = body.get("voices")
+
+    if not isinstance(voices, list):
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Missing or invalid voices array"
+            }, ensure_ascii=False),
+            status_code=400,
+            mimetype="application/json"
+        )
+
+    for index, voice in enumerate(voices):
+        if not isinstance(voice, dict):
+            return func.HttpResponse(
+                json.dumps({
+                    "error": "Invalid voice entry",
+                    "index": index
+                }, ensure_ascii=False),
+                status_code=400,
+                mimetype="application/json"
+            )
+
+        for field in ("locale", "short_name", "gender"):
+            if not isinstance(voice.get(field), str) or not voice[field].strip():
+                return func.HttpResponse(
+                    json.dumps({
+                        "error": "Missing or invalid voice field",
+                        "index": index,
+                        "field": field
+                    }, ensure_ascii=False),
+                    status_code=400,
+                    mimetype="application/json"
+                )
+
+    # =========================================================
+    # DATABASE
+    # =========================================================
+
+    try:
+        connection_string = os.environ["SQL_CONNECTION_STRING"]
+        voices_json = json.dumps(voices, ensure_ascii=False)
+
+        with pyodbc.connect(
+            connection_string,
+            timeout=10
+        ) as conn:
+            cursor = conn.cursor()
+
+            cursor.execute(
+                """
+                EXEC dbo.sp_sync_voice_catalog
+                    @voices_json = ?
+                """,
+                voices_json
+            )
+
+            row = cursor.fetchone()
+
+            if row is None:
+                logging.error(
+                    "POST /api/voices/sync procedure returned no result"
+                )
+                return func.HttpResponse(
+                    json.dumps({
+                        "error": "Voice synchronization returned no result"
+                    }, ensure_ascii=False),
+                    status_code=500,
+                    mimetype="application/json"
+                )
+
+            columns = [column[0] for column in cursor.description]
+            statistics = dict(zip(columns, row))
+
+            return func.HttpResponse(
+                json.dumps(statistics, ensure_ascii=False),
+                status_code=200,
+                mimetype="application/json"
+            )
+
+    except pyodbc.Error as error:
+        error_message = str(error)
+        logging.exception("POST /api/voices/sync database error")
+
+        # SQL procedure validation errors (51001–51007) are
+        # client-side catalog errors, not server failures.
+        if any(f"({number})" in error_message for number in range(51001, 51008)):
+            return func.HttpResponse(
+                json.dumps({
+                    "error": "Invalid voice catalog",
+                    "message": error_message
+                }, ensure_ascii=False),
+                status_code=400,
+                mimetype="application/json"
+            )
+
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Database error"
+            }, ensure_ascii=False),
+            status_code=500,
+            mimetype="application/json"
+        )
+
+    except Exception:
+        logging.exception("POST /api/voices/sync failed")
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Internal server error"
+            }, ensure_ascii=False),
+            status_code=500,
+            mimetype="application/json"
+        )
+
+
 @app.route(route="voice-test", methods=["POST"])
 def voice_test(req: func.HttpRequest) -> func.HttpResponse:
     """Evaluate a spoken phrase using Azure Speech Pronunciation Assessment."""
