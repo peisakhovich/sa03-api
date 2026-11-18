@@ -519,10 +519,10 @@ def recognize_standard_speech(
 
 
 def _normalize_comparison_word(word: str) -> str:
-    """Match the Flutter token normalizer: lowercase and trim edge punctuation only."""
+    """Use the same edge-punctuation normalization as the Flutter parser."""
 
     return re.sub(
-        r'^[.,!?;:()\[\]{}"„”«»…—–-]+|[.,!?;:()\[\]{}"„”«»…—–-]+$',
+        r"""^[.,!?;:()"'«»„“”]+|[.,!?;:()"'«»„“”]+$""",
         "",
         word.lower(),
     )
