@@ -2469,11 +2469,11 @@ def voice_test(req: func.HttpRequest) -> func.HttpResponse:
             result["standard_recognition"] = standard_result
 
             azure_reference_words = [
-                word.get("word", "").strip()
+                str(word.get("word") or "").strip()
                 for word in result.get("words", [])
                 if isinstance(word, dict)
                 and word.get("error_type") != "Insertion"
-                and word.get("word", "").strip()
+                and str(word.get("word") or "").strip()
             ]
             recognized_words = [
                 word["word"] for word in standard_result.get("words", [])
