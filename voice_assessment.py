@@ -8,6 +8,7 @@ import io
 import json
 import logging
 import os
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -417,4 +418,229 @@ def assess_pronunciation(
             "locale": locale,
             "assessment_version": ASSESSMENT_VERSION,
         },
+    }
+
+
+
+def recognize_standard_speech(
+    locale: str,
+    audio_bytes: bytes,
+) -> dict:
+    """Recognize the same recording independently, without pronunciation assessment."""
+
+    speech_key = os.environ.get("AZURE_SPEECH_KEY")
+    speech_region = os.environ.get("AZURE_SPEECH_REGION")
+
+    if not speech_key or not speech_region:
+        raise VoiceAssessmentError(
+            "speech_service_not_configured",
+            "Azure Speech service is not configured.",
+            500,
+        )
+
+    request = urllib.request.Request(
+        _build_endpoint(speech_region, locale),
+        data=bytes(audio_bytes),
+        headers={
+            "Ocp-Apim-Subscription-Key": speech_key,
+            "Content-Type": "audio/wav; codecs=audio/pcm; samplerate=16000",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(
+            request,
+            timeout=AZURE_TIMEOUT_SECONDS,
+        ) as response:
+            response_body = response.read()
+    except urllib.error.HTTPError as error:
+        code, message, status = _azure_error_message(error.code)
+        raise VoiceAssessmentError(code, message, status)
+    except (urllib.error.URLError, TimeoutError, OSError):
+        logging.exception("Azure standard Speech-to-Text request failed")
+        raise VoiceAssessmentError(
+            "standard_recognition_unavailable",
+            "Independent speech recognition is temporarily unavailable.",
+            502,
+        )
+
+    try:
+        azure_result = json.loads(response_body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise VoiceAssessmentError(
+            "standard_recognition_invalid_response",
+            "Azure Speech returned an invalid standard-recognition response.",
+            502,
+        )
+
+    if not isinstance(azure_result, dict):
+        raise VoiceAssessmentError(
+            "standard_recognition_invalid_response",
+            "Azure Speech returned an unexpected standard-recognition response.",
+            502,
+        )
+
+    if azure_result.get("RecognitionStatus") != "Success":
+        raise VoiceAssessmentError(
+            "standard_recognition_no_speech",
+            "Independent speech recognition could not recognize speech.",
+            422,
+        )
+
+    candidates = azure_result.get("NBest")
+    if not isinstance(candidates, list) or not candidates or not isinstance(candidates[0], dict):
+        raise VoiceAssessmentError(
+            "standard_recognition_empty",
+            "Azure Speech did not return a recognized transcript.",
+            422,
+        )
+
+    best = candidates[0]
+    display_text = str(best.get("Display") or "").strip()
+    lexical_text = str(best.get("Lexical") or "").strip()
+    lexical_words = lexical_text.split() if lexical_text else display_text.split()
+
+    if not display_text or not lexical_words:
+        raise VoiceAssessmentError(
+            "standard_recognition_empty",
+            "Azure Speech did not return a recognized transcript.",
+            422,
+        )
+
+    return {
+        "success": True,
+        "recognized_text": display_text,
+        "lexical_text": lexical_text or " ".join(lexical_words),
+        "confidence": best.get("Confidence"),
+        "words": [{"word": word} for word in lexical_words],
+    }
+
+
+def _normalize_comparison_word(word: str) -> str:
+    """Match the Flutter token normalizer: lowercase and trim edge punctuation only."""
+
+    return re.sub(
+        r'^[.,!?;:()\[\]{}"„”«»…—–-]+|[.,!?;:()\[\]{}"„”«»…—–-]+$',
+        "",
+        word.lower(),
+    )
+
+
+def compare_voice_text(
+    reference_text: str,
+    recognized_words: list[str],
+    azure_reference_words: list[str] | None = None,
+) -> dict:
+    """Build deterministic word-level Levenshtein alignment for the mobile client."""
+
+    reference_tokens = reference_text.strip().split()
+    if (
+        azure_reference_words
+        and len(azure_reference_words) == len(reference_tokens)
+    ):
+        # Keep the spoken word forms used by Azure PA (e.g. number words)
+        # when the number of Azure tokens matches the reference token count.
+        reference_tokens = list(azure_reference_words)
+
+    recognized_tokens = list(recognized_words)
+    n = len(reference_tokens)
+    m = len(recognized_tokens)
+
+    dp = [[0] * (m + 1) for _ in range(n + 1)]
+
+    for i in range(n, -1, -1):
+        for j in range(m, -1, -1):
+            if i == n and j == m:
+                dp[i][j] = 0
+            elif i == n:
+                dp[i][j] = m - j
+            elif j == m:
+                dp[i][j] = n - i
+            else:
+                diagonal_cost = (
+                    0
+                    if _normalize_comparison_word(reference_tokens[i])
+                    == _normalize_comparison_word(recognized_tokens[j])
+                    else 1
+                )
+                dp[i][j] = min(
+                    diagonal_cost + dp[i + 1][j + 1],
+                    1 + dp[i + 1][j],
+                    1 + dp[i][j + 1],
+                )
+
+    alignment = []
+    counts = {
+        "matches": 0,
+        "substitutions": 0,
+        "omissions": 0,
+        "insertions": 0,
+    }
+    i = 0
+    j = 0
+
+    while i < n or j < m:
+        if (
+            i < n
+            and j < m
+            and _normalize_comparison_word(reference_tokens[i])
+            == _normalize_comparison_word(recognized_tokens[j])
+            and dp[i][j] == dp[i + 1][j + 1]
+        ):
+            alignment.append({
+                "type": "match",
+                "reference_word": reference_tokens[i],
+                "recognized_word": recognized_tokens[j],
+            })
+            counts["matches"] += 1
+            i += 1
+            j += 1
+            continue
+
+        # Match the Flutter algorithm's deterministic tie-breaking.
+        if j < m and dp[i][j] == 1 + dp[i][j + 1]:
+            alignment.append({
+                "type": "insertion",
+                "reference_word": None,
+                "recognized_word": recognized_tokens[j],
+            })
+            counts["insertions"] += 1
+            j += 1
+            continue
+
+        if i < n and dp[i][j] == 1 + dp[i + 1][j]:
+            alignment.append({
+                "type": "omission",
+                "reference_word": reference_tokens[i],
+                "recognized_word": None,
+            })
+            counts["omissions"] += 1
+            i += 1
+            continue
+
+        if i < n and j < m and dp[i][j] == 1 + dp[i + 1][j + 1]:
+            alignment.append({
+                "type": "substitution",
+                "reference_word": reference_tokens[i],
+                "recognized_word": recognized_tokens[j],
+            })
+            counts["substitutions"] += 1
+            i += 1
+            j += 1
+            continue
+
+        raise RuntimeError("Unable to construct a complete voice-token alignment.")
+
+    return {
+        "success": True,
+        "method": "word_level_levenshtein",
+        "edit_distance": (
+            counts["substitutions"]
+            + counts["omissions"]
+            + counts["insertions"]
+        ),
+        "counts": counts,
+        "alignment": alignment,
     }
