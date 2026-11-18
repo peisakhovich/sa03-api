@@ -5,7 +5,12 @@ import pyodbc
 import azure.functions as func
 from password import hash_password
 from password import verify_password
-from voice_assessment import assess_pronunciation, VoiceAssessmentError
+from voice_assessment import (
+    assess_pronunciation,
+    recognize_standard_speech,
+    compare_voice_text,
+    VoiceAssessmentError,
+)
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 
@@ -2453,6 +2458,50 @@ def voice_test(req: func.HttpRequest) -> func.HttpResponse:
             locale=locale,
             audio_bytes=audio_bytes,
         )
+
+        # Standard STT is deliberately independent from Pronunciation Assessment.
+        # Its failure must not discard valid Azure pronunciation scores.
+        try:
+            standard_result = recognize_standard_speech(
+                locale=locale,
+                audio_bytes=audio_bytes,
+            )
+            result["standard_recognition"] = standard_result
+
+            azure_reference_words = [
+                word.get("word", "").strip()
+                for word in result.get("words", [])
+                if isinstance(word, dict)
+                and word.get("error_type") != "Insertion"
+                and word.get("word", "").strip()
+            ]
+            recognized_words = [
+                word["word"] for word in standard_result.get("words", [])
+            ]
+            result["comparison"] = compare_voice_text(
+                reference_text=reference_text,
+                recognized_words=recognized_words,
+                azure_reference_words=azure_reference_words,
+            )
+        except VoiceAssessmentError as recognition_error:
+            result["standard_recognition"] = {
+                "success": False,
+                "error": {
+                    "code": recognition_error.code,
+                    "message": recognition_error.message,
+                },
+            }
+            result["comparison"] = {
+                "success": False,
+                "error": {
+                    "code": "text_comparison_unavailable",
+                    "message": "Text comparison is unavailable because independent recognition failed.",
+                },
+            }
+            logging.warning(
+                "Independent recognition failed; returning Azure assessment only: %s",
+                recognition_error.code,
+            )
 
         return func.HttpResponse(
             json.dumps(result, ensure_ascii=False),
